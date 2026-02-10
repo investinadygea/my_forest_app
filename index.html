@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>FGIS LK Parser v1.1</title>
+    <title>FGIS LK Parser v1.2 - TreeInfo Mode</title>
     <script src="//api.bitrix24.com/api/v1/"></script>
     <style>
         body { font-family: "Open Sans", system-ui; color: #535c69; background: #f0f3f5; padding: 15px; }
@@ -13,11 +13,12 @@
         .tab-content.active { display: block; }
         .field-row { display: grid; grid-template-columns: 1fr 1fr 1fr 40px; gap: 10px; margin-bottom: 10px; }
         input { padding: 8px; border: 1px solid #c6cdd3; border-radius: 3px; width: 100%; box-sizing: border-box; }
-        .btn { padding: 8px 16px; border-radius: 4px; cursor: pointer; border: none; font-weight: 600; }
+        .btn { padding: 8px 16px; border-radius: 4px; cursor: pointer; border: none; font-weight: 600; margin-top: 5px; }
         .btn-primary { background: #2fc6f6; color: #fff; }
         .btn-success { background: #bbed21; color: #535c69; }
         .btn-danger { background: #ff5752; color: #fff; }
         h3 { font-size: 14px; color: #80868e; text-transform: uppercase; border-bottom: 1px solid #f2f2f2; padding-bottom: 5px; }
+        .hint { font-size: 12px; color: #a0a0a0; margin-top: 5px; }
     </style>
 </head>
 <body>
@@ -28,20 +29,22 @@
 </div>
 
 <div id="info" class="tab-content active">
-    <h2>Парсер ФГИС ЛК v1.1</h2>
-    <p>Обработка сложных XML структур (суммирование объемов, перечисление пород).</p>
-    <button class="btn btn-primary" onclick="registerActivity()">Обновить/Установить Activity в БП</button>
+    <h2>Парсер ФГИС ЛК v1.2</h2>
+    <p><b>Режим:</b> Одна запись на каждую породу (treeInfo).</p>
+    <p>Данная версия создает отдельный элемент Смарт-процесса для каждой породы внутри выдела.</p>
+    <button class="btn btn-primary" onclick="registerActivity()">Обновить Activity в БП</button>
 </div>
 
 <div id="settings" class="tab-content">
     <div class="section">
         <label><b>ID Смарт-процесса (EntityTypeID):</b></label>
-        <input type="number" id="smart_id" style="width: 150px;" placeholder="например 131">
+        <input type="number" id="smart_id" style="width: 150px;" placeholder="напр. 131">
     </div>
     <div class="section">
         <h3>Настройка полей</h3>
+        <p class="hint">Парсер сначала ищет тег в данных породы (treeInfo), если не находит — берет из данных выдела.</p>
         <div id="mapping_list"></div>
-        <button class="btn btn-success" style="float: right; margin-top: 10px;" onclick="addFieldRow()">+ Добавить поле</button>
+        <button class="btn btn-success" style="float: right;" onclick="addFieldRow()">+ Добавить поле</button>
     </div>
     <button class="btn btn-primary" style="width: 100%; margin-top: 30px;" onclick="saveConfig()">Сохранить настройки</button>
 </div>
@@ -57,7 +60,7 @@
         const div = document.createElement('div');
         div.className = 'field-row';
         div.innerHTML = `
-            <input type="text" class="xml-key" value="${xml}" placeholder="Тэг (напр. volume)">
+            <input type="text" class="xml-key" value="${xml}" placeholder="Тэг (напр. tree)">
             <input type="text" class="xml-label" value="${label}" placeholder="Название">
             <input type="text" class="b24-key" value="${b24}" placeholder="UF_CRM_...">
             <button class="btn btn-danger" onclick="this.parentElement.remove()">×</button>
@@ -72,51 +75,37 @@
             b24: r.querySelector('.b24-key').value
         }));
         const config = { smartId: document.getElementById('smart_id').value, mapping: mapping };
-        BX24.appOption.set('forest_config_v1.1', config, () => alert('Настройки сохранены!'));
+        BX24.appOption.set('forest_config_tree_mode', config, () => alert('Настройки v1.2 сохранены!'));
     }
 
-    // УНИВЕРСАЛЬНЫЙ ЭКСТРАКТОР ДАННЫХ
-    const getXmlData = (parentXml, tagName) => {
-        const elements = Array.from(parentXml.getElementsByTagName(tagName));
-        if (elements.length === 0) return "";
-
-        // Теги, которые мы суммируем как числа
-        const tagsToSum = ['volume', 'stock', 'volumeWoodCommodity', 'volumeFuelWood', 'stockForTree', 'taxationSquare', 'CuttingSquares'];
-        
-        if (tagsToSum.includes(tagName)) {
-            let sum = elements.reduce((acc, el) => {
-                let val = parseFloat(el.textContent.replace(',', '.'));
-                return acc + (isNaN(val) ? 0 : val);
-            }, 0);
-            return sum % 1 === 0 ? sum : sum.toFixed(2);
-        } else {
-            // Текстовые данные собираем через запятую (уникальные значения)
-            let texts = elements.map(el => el.textContent.trim()).filter(t => t !== "");
-            return [...new Set(texts)].join(', ');
-        }
+    // Извлечение данных с учетом иерархии (Порода -> Выдел)
+    const getVal = (xmlNode, tagName) => {
+        const el = xmlNode.getElementsByTagName(tagName)[0];
+        if (!el) return "";
+        let val = el.textContent.trim();
+        // Авто-замена запятой для числовых полей
+        return val.replace(',', '.');
     };
 
     async function registerActivity() {
         BX24.callMethod('bizproc.activity.add', {
-            'CODE': 'forest_parser_final',
+            'CODE': 'forest_parser_tree_v1.2',
             'HANDLER': window.location.href,
             'AUTH_USER_ID': 1,
-            'NAME': 'Парсинг лесосеки (Универсальный)',
+            'NAME': 'Парсинг XML (Запись = Порода)',
             'PROPERTIES': {
                 'fileId': { 'Name': 'ID файла XML', 'Type': 'string', 'Required': 'Y' },
-                'parentId': { 'Name': 'ID элемента (для привязки)', 'Type': 'int' }
+                'parentId': { 'Name': 'ID Договора (Родитель)', 'Type': 'int' }
             }
-        }, () => alert('Действие успешно добавлено в БП!'));
+        }, () => alert('Activity v1.2 зарегистрировано!'));
     }
 
     // ИНИЦИАЛИЗАЦИЯ
     BX24.init(() => {
-        const cfg = BX24.appOption.get('forest_config_v1.1');
+        const cfg = BX24.appOption.get('forest_config_tree_mode');
         if(cfg) {
             document.getElementById('smart_id').value = cfg.smartId;
             cfg.mapping.forEach(m => addFieldRow(m.xml, m.name, m.b24));
-        } else {
-            addFieldRow('taxationUnitUser', 'Номер выдела', 'UF_CRM_...');
         }
     });
 </script>
