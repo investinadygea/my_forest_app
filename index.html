@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>FGIS LK Parser v1.2 - TreeInfo Mode</title>
+    <title>FGIS LK Parser v1.3</title>
     <script src="//api.bitrix24.com/api/v1/"></script>
     <style>
         body { font-family: "Open Sans", system-ui; color: #535c69; background: #f0f3f5; padding: 15px; }
@@ -18,7 +18,7 @@
         .btn-success { background: #bbed21; color: #535c69; }
         .btn-danger { background: #ff5752; color: #fff; }
         h3 { font-size: 14px; color: #80868e; text-transform: uppercase; border-bottom: 1px solid #f2f2f2; padding-bottom: 5px; }
-        .hint { font-size: 12px; color: #a0a0a0; margin-top: 5px; }
+        .status-log { background: #333; color: #bbed21; padding: 10px; font-family: monospace; font-size: 12px; border-radius: 5px; margin-top: 10px; display: none; }
     </style>
 </head>
 <body>
@@ -29,20 +29,19 @@
 </div>
 
 <div id="info" class="tab-content active">
-    <h2>Парсер ФГИС ЛК v1.2</h2>
-    <p><b>Режим:</b> Одна запись на каждую породу (treeInfo).</p>
-    <p>Данная версия создает отдельный элемент Смарт-процесса для каждой породы внутри выдела.</p>
-    <button class="btn btn-primary" onclick="registerActivity()">Обновить Activity в БП</button>
+    <h2>Парсер ФГИС ЛК v1.3</h2>
+    <p>Создает элементы Смарт-процесса (Запись = Порода).</p>
+    <button class="btn btn-primary" onclick="registerActivity()">Зарегистрировать Activity</button>
+    <div id="log" class="status-log"></div>
 </div>
 
 <div id="settings" class="tab-content">
     <div class="section">
         <label><b>ID Смарт-процесса (EntityTypeID):</b></label>
-        <input type="number" id="smart_id" style="width: 150px;" placeholder="напр. 131">
+        <input type="number" id="smart_id" style="width: 150px;">
     </div>
     <div class="section">
-        <h3>Настройка полей</h3>
-        <p class="hint">Парсер сначала ищет тег в данных породы (treeInfo), если не находит — берет из данных выдела.</p>
+        <h3>Маппинг полей</h3>
         <div id="mapping_list"></div>
         <button class="btn btn-success" style="float: right;" onclick="addFieldRow()">+ Добавить поле</button>
     </div>
@@ -59,12 +58,7 @@
     function addFieldRow(xml = '', label = '', b24 = '') {
         const div = document.createElement('div');
         div.className = 'field-row';
-        div.innerHTML = `
-            <input type="text" class="xml-key" value="${xml}" placeholder="Тэг (напр. tree)">
-            <input type="text" class="xml-label" value="${label}" placeholder="Название">
-            <input type="text" class="b24-key" value="${b24}" placeholder="UF_CRM_...">
-            <button class="btn btn-danger" onclick="this.parentElement.remove()">×</button>
-        `;
+        div.innerHTML = `<input type="text" class="xml-key" value="${xml}" placeholder="Тэг"><input type="text" class="xml-label" value="${label}" placeholder="Название"><input type="text" class="b24-key" value="${b24}" placeholder="UF_CRM..."><button class="btn btn-danger" onclick="this.parentElement.remove()">×</button>`;
         document.getElementById('mapping_list').appendChild(div);
     }
 
@@ -75,37 +69,95 @@
             b24: r.querySelector('.b24-key').value
         }));
         const config = { smartId: document.getElementById('smart_id').value, mapping: mapping };
-        BX24.appOption.set('forest_config_tree_mode', config, () => alert('Настройки v1.2 сохранены!'));
+        BX24.appOption.set('forest_config_v1.3', config, () => alert('Настройки сохранены!'));
     }
 
-    // Извлечение данных с учетом иерархии (Порода -> Выдел)
-    const getVal = (xmlNode, tagName) => {
-        const el = xmlNode.getElementsByTagName(tagName)[0];
-        if (!el) return "";
-        let val = el.textContent.trim();
-        // Авто-замена запятой для числовых полей
-        return val.replace(',', '.');
-    };
+    function log(msg) {
+        const l = document.getElementById('log');
+        l.style.display = 'block';
+        l.innerHTML += '> ' + msg + '<br>';
+    }
+
+    // ОСНОВНАЯ ФУНКЦИЯ ПАРСИНГА ДЛЯ БП
+    async function runParserActivity() {
+        const placement = BX24.placement.info();
+        if (placement.placement !== 'BIZPROC_ACTIVITY') return;
+
+        const options = placement.options;
+        const eventToken = options.event_token;
+        const fileId = options.properties.fileId;
+        const parentId = options.properties.parentId;
+
+        log('Запуск парсинга файла ID: ' + fileId);
+
+        const config = BX24.appOption.get('forest_config_v1.3');
+        if (!config) return finalize(eventToken, { error: 'Приложение не настроено' });
+
+        // 1. Получаем файл с Диска
+        BX24.callMethod('disk.file.get', { id: fileId }, async function(res) {
+            if (res.error()) return finalize(eventToken, { error: 'Файл не найден' });
+
+            const downloadUrl = res.data().DOWNLOAD_URL;
+            const response = await fetch(downloadUrl);
+            const xmlText = await response.text();
+            
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+            const units = Array.from(xmlDoc.getElementsByTagName("taxationDescription"));
+            const batchCommands = {};
+            let count = 0;
+
+            units.forEach((unit) => {
+                const trees = Array.from(unit.getElementsByTagName("treeInfo"));
+                trees.forEach((tree) => {
+                    const fields = { 'parentId2': parentId }; // Привязка к Договору
+                    config.mapping.forEach(m => {
+                        // Ищем в дереве, если нет - в выделе
+                        let el = tree.getElementsByTagName(m.xml)[0] || unit.getElementsByTagName(m.xml)[0];
+                        if (el) fields[m.b24] = el.textContent.trim().replace(',', '.');
+                    });
+                    
+                    batchCommands['cmd_' + count] = ['crm.item.add', { entityTypeId: config.smartId, fields: fields }];
+                    count++;
+                });
+            });
+
+            log('Создаем записей: ' + count);
+
+            // 2. Выполняем Batch
+            BX24.callBatch(batchCommands, function() {
+                log('Парсинг успешно завершен');
+                finalize(eventToken, { result: 'Ok', count: count });
+            });
+        });
+    }
+
+    function finalize(token, returnValues) {
+        BX24.callMethod('bizproc.event.send', { "event_token": token, "return_values": returnValues });
+    }
 
     async function registerActivity() {
         BX24.callMethod('bizproc.activity.add', {
-            'CODE': 'forest_parser_tree_v1.2',
+            'CODE': 'forest_v1.3',
             'HANDLER': window.location.href,
             'AUTH_USER_ID': 1,
-            'NAME': 'Парсинг XML (Запись = Порода)',
+            'NAME': 'Парсинг ТО (Версия 1.3)',
             'PROPERTIES': {
                 'fileId': { 'Name': 'ID файла XML', 'Type': 'string', 'Required': 'Y' },
-                'parentId': { 'Name': 'ID Договора (Родитель)', 'Type': 'int' }
+                'parentId': { 'Name': 'ID Договора', 'Type': 'int' }
             }
-        }, () => alert('Activity v1.2 зарегистрировано!'));
+        }, () => alert('Activity v1.3 зарегистрировано!'));
     }
 
-    // ИНИЦИАЛИЗАЦИЯ
     BX24.init(() => {
-        const cfg = BX24.appOption.get('forest_config_tree_mode');
+        const cfg = BX24.appOption.get('forest_config_v1.3');
         if(cfg) {
             document.getElementById('smart_id').value = cfg.smartId;
             cfg.mapping.forEach(m => addFieldRow(m.xml, m.name, m.b24));
+        }
+        // Если приложение открыто как Activity в фоне
+        if (BX24.placement.info().placement === 'BIZPROC_ACTIVITY') {
+            runParserActivity();
         }
     });
 </script>
