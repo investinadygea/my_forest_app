@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>FGIS LK Parser</title>
+    <script src="//api.bitrix24.com/api/v1/"></script>
+    <style>
+        body { font-family: "Open Sans", system-ui; color: #535c69; background: #f0f3f5; padding: 15px; }
+        .tabs-header { display: flex; gap: 5px; margin-bottom: -1px; }
+        .tab-btn { padding: 10px 20px; border: 1px solid #dfe2e5; background: #ebedef; cursor: pointer; border-radius: 5px 5px 0 0; }
+        .tab-btn.active { background: #fff; border-bottom: 1px solid #fff; font-weight: bold; }
+        .tab-content { background: #fff; border: 1px solid #dfe2e5; padding: 20px; display: none; border-radius: 0 5px 5px 5px; }
+        .tab-content.active { display: block; }
+        
+        .field-row { display: grid; grid-template-columns: 1fr 1fr 1fr 40px; gap: 10px; margin-bottom: 10px; }
+        input { padding: 8px; border: 1px solid #c6cdd3; border-radius: 3px; width: 100%; box-sizing: border-box; }
+        .section { margin-bottom: 25px; }
+        .btn { padding: 8px 16px; border-radius: 4px; cursor: pointer; border: none; font-weight: 600; }
+        .btn-primary { background: #2fc6f6; color: #fff; }
+        .btn-success { background: #bbed21; color: #535c69; }
+        .btn-danger { background: #ff5752; color: #fff; }
+        h3 { font-size: 14px; color: #80868e; text-transform: uppercase; border-bottom: 1px solid #f2f2f2; padding-bottom: 5px; }
+    </style>
+</head>
+<body>
+
+<div class="tabs-header">
+    <div class="tab-btn active" onclick="showTab('info')">Информация</div>
+    <div class="tab-btn" onclick="showTab('settings')">Настройки</div>
+</div>
+
+<div id="info" class="tab-content active">
+    <h2>Парсер таксационных описаний ФГИС ЛК</h2>
+    <p>Версия: 1.0.0 (Adaptive JS)</p>
+    <p>Приложение добавляет действие в Бизнес-процессы, которое разбирает XML-файл и создает записи в Смарт-процессе на каждый выдел.</p>
+    <hr>
+    <button class="btn btn-primary" onclick="registerActivity()">Установить Activity в Дизайнер БП</button>
+</div>
+
+<div id="settings" class="tab-content">
+    <div class="section">
+        <label><b>ID Смарт-процесса:</b></label>
+        <input type="number" id="smart_id" style="width: 150px;" placeholder="131">
+    </div>
+
+    <div class="section">
+        <h3>Маппинг атрибутов XML</h3>
+        <div class="field-row" style="font-weight: bold; font-size: 12px;">
+            <div>Атрибут XML</div>
+            <div>Название поля</div>
+            <div>Код поля (UF_CRM_...)</div>
+            <div></div>
+        </div>
+        <div id="mapping_list"></div>
+        <button class="btn btn-success" style="float: right;" onclick="addFieldRow()">+ Добавить</button>
+    </div>
+    
+    <div style="margin-top: 40px;">
+        <button class="btn btn-primary" style="width: 100%;" onclick="saveConfig()">Сохранить настройки</button>
+    </div>
+</div>
+
+<script>
+    // --- ИНТЕРФЕЙСНАЯ ЛОГИКА ---
+    function showTab(id) {
+        document.querySelectorAll('.tab-content, .tab-btn').forEach(el => el.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+        event.currentTarget.classList.add('active');
+    }
+
+    function addFieldRow(xml = '', label = '', b24 = '') {
+        const div = document.createElement('div');
+        div.className = 'field-row';
+        div.innerHTML = `
+            <input type="text" class="xml-key" value="${xml}" placeholder="taxationSquare">
+            <input type="text" class="xml-label" value="${label}" placeholder="Площадь">
+            <input type="text" class="b24-key" value="${b24}" placeholder="UF_CRM_...">
+            <button class="btn btn-danger" onclick="this.parentElement.remove()">×</button>
+        `;
+        document.getElementById('mapping_list').appendChild(div);
+    }
+
+    // --- РАБОТА С ДАННЫМИ ---
+    function saveConfig() {
+        const rows = document.querySelectorAll('.field-row:not([style*="bold"])');
+        const mapping = Array.from(rows).map(r => ({
+            xml: r.querySelector('.xml-key').value,
+            name: r.querySelector('.xml-label').value,
+            b24: r.querySelector('.b24-key').value
+        }));
+
+        const config = {
+            smartId: document.getElementById('smart_id').value,
+            mapping: mapping
+        };
+
+        BX24.appOption.set('forest_config', config, () => alert('Настройки сохранены!'));
+    }
+
+    function registerActivity() {
+        BX24.callMethod('bizproc.activity.add', {
+            'CODE': 'forest_xml_parser_v1',
+            'HANDLER': window.location.href,
+            'AUTH_USER_ID': 1,
+            'NAME': 'Парсинг XML лесосеки',
+            'DESCRIPTION': 'Создает элементы Смарт-процесса из файла ФГИС ЛК',
+            'PROPERTIES': {
+                'fileId': { 'Name': 'ID файла из параметров БП', 'Type': 'string', 'Required': 'Y' },
+                'parentId': { 'Name': 'ID родителя (для привязки)', 'Type': 'int' }
+            }
+        }, () => alert('Activity добавлено в Дизайнер БП'));
+    }
+
+    // --- ПАРСЕР (ВЫПОЛНЯЕТСЯ ПРИ ВЫЗОВЕ ИЗ БП) ---
+    async function runParserActivity() {
+        const auth = BX24.getAuth();
+        if (!auth || !window.name) return; // Проверка, что вызвано как Activity
+
+        const config = BX24.appOption.get('forest_config');
+        const params = /* Здесь логика получения параметров из события БП */ {}; 
+
+        // Примечание: В реальном Activity данные приходят через POST, 
+        // но в JS SDK "чистом" облаке мы ориентируемся на событие выполнения.
+    }
+
+    BX24.init(() => {
+        const cfg = BX24.appOption.get('forest_config');
+        if(cfg) {
+            document.getElementById('smart_id').value = cfg.smartId;
+            cfg.mapping.forEach(m => addFieldRow(m.xml, m.name, m.b24));
+        }
+    });
+</script>
+</body>
+</html>
